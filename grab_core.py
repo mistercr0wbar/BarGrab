@@ -267,34 +267,30 @@ def browser_available() -> bool:
     return True
 
 
-def _playwright_ffmpeg() -> str | None:
-    """Playwright ships an ffmpeg next to Chromium. Use it if PATH has none.
+def _winget_ffmpeg() -> str | None:
+    """Gyan's full build, even if this shell was opened before PATH updated.
 
-    On Windows that is %LOCALAPPDATA%\\ms-playwright\\ffmpeg-*\\ffmpeg-win64.exe,
-    which `python -m playwright install chromium` already downloaded.
+    Playwright ships a tiny ffmpeg next to Chromium. That one is not used:
+    it encodes a single WebP frame and that is how keepers became stills.
     """
-    roots = []
     local = os.environ.get("LOCALAPPDATA")
-    if local:
-        roots.append(Path(local) / "ms-playwright")
-    roots.append(Path.home() / ".cache" / "ms-playwright")
-    names = ("ffmpeg-win64.exe", "ffmpeg.exe", "ffmpeg-linux", "ffmpeg")
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for folder in sorted(root.glob("ffmpeg-*"), reverse=True):
-            for name in names:
-                candidate = folder / name
-                if candidate.is_file():
-                    return str(candidate)
-    return None
+    if not local:
+        return None
+    links = Path(local) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+    if links.is_file():
+        return str(links)
+    packages = Path(local) / "Microsoft" / "WinGet" / "Packages"
+    if not packages.is_dir():
+        return None
+    found = sorted(packages.glob("Gyan.FFmpeg*/ffmpeg*/bin/ffmpeg.exe"))
+    return str(found[-1]) if found else None
 
 
 def find_ffmpeg() -> str | None:
     found = shutil.which("ffmpeg")
     if found:
         return found
-    found = _playwright_ffmpeg()
+    found = _winget_ffmpeg()
     if found:
         return found
     try:
@@ -351,6 +347,24 @@ def is_junk_url(url: str) -> bool:
 
 def is_fetchable(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://")
+
+
+def is_animated_webp(data: bytes) -> bool:
+    """True only for a multi-frame WebP. VP8/VP8L stills are posters."""
+    if len(data) < 21 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return False
+    if data[12:16] == b"VP8X" and data[20] & 0x02:
+        return True
+    return b"ANIM" in data[:128]
+
+
+def is_motion(data: bytes, kind: str | None = None) -> bool:
+    kind = kind or sniff(data)
+    if kind in {"mp4", "webm", "gif"}:
+        return True
+    if kind == "webp":
+        return is_animated_webp(data)
+    return False
 
 
 def sniff(data: bytes) -> str | None:
@@ -476,6 +490,8 @@ def _prefer_clips(
     def key(item: tuple[bytes, str | None, str]) -> int:
         body, mime, url = item
         kind = sniff(body) or classify(url, mime) or "jpg"
+        if kind == "webp" and not is_animated_webp(body):
+            return 3
         return rank.get(kind, 9)
 
     return sorted(files, key=key)
@@ -504,12 +520,15 @@ def is_clip_like(url: str, page_url: str) -> bool:
 
 
 def webp_command(ffmpeg: str, src: Path, dest: Path) -> list[str]:
+    # fps_mode passthrough is what stops ffmpeg collapsing the video to
+    # one WebP frame. Without it, libwebp "succeeds" and you get a still.
     return [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(src),
         "-an",
         "-loop", "0",
-        "-vf", "scale='min(720,iw)':-2:flags=lanczos",
+        "-fps_mode", "passthrough",
+        "-vf", "fps=15,scale='min(720,iw)':-2:flags=lanczos",
         "-c:v", "libwebp",
         "-quality", "70",
         str(dest),
@@ -540,8 +559,10 @@ def convert_video(src: Path, dest: Path, ffmpeg: str | None = None) -> Path:
     except FileNotFoundError as exc:
         raise ConvertError("ffmpeg is not installed") from exc
     if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-        return dest
-    if dest.exists():
+        if is_animated_webp(dest.read_bytes()):
+            return dest
+        dest.unlink()
+    elif dest.exists():
         dest.unlink()
     gif_dest = dest.with_suffix(".gif")
     proc = subprocess.run(
@@ -643,6 +664,8 @@ class Library:
         kind = sniff(data) or classify(source_url, mime)
         if kind is None:
             return "unknown"
+        if not is_motion(data, kind):
+            return "still"
         if len(data) < min_bytes:
             return "tiny"
         if len(data) > max_bytes:
@@ -813,13 +836,17 @@ def capture_browser(
                 return
             mime = (response.headers.get("content-type") or "").split(";")[0]
             kind = classify(response.url, mime)
-            if kind is None or is_junk_url(response.url):
+            if kind in {"png", "jpg"} or kind is None or is_junk_url(response.url):
                 return
             body = response.body()
         except Exception:
             return
-        if body:
-            intercepted.append((body, mime or None, response.url))
+        if not body:
+            return
+        kind = sniff(body) or kind
+        if not is_motion(body, kind):
+            return
+        intercepted.append((body, mime or None, response.url))
 
     html = ""
     page = context.new_page()

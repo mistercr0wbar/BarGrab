@@ -97,3 +97,10 @@ class LibraryTests(unittest.TestCase):
             TINY_GIF, source_url="https://x/a.gif", page_url="https://x/"
         )
         self.assertEqual(outcome, "tiny")
+
+    def test_still_webp_is_refused(self):
+        still = b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * core.MIN_BYTES
+        outcome = self.lib.save_bytes(
+            still, source_url="https://x/poster.webp", page_url="https://x/"
+        )
+        self.assertEqual(outcome, "still")

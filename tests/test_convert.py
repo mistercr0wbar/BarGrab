@@ -20,6 +20,8 @@ class CommandTests(unittest.TestCase):
         self.assertIn("-loop", cmd)
         self.assertEqual(cmd[cmd.index("-loop") + 1], "0")
         self.assertIn("libwebp", cmd)
+        self.assertIn("-fps_mode", cmd)
+        self.assertIn("passthrough", cmd)
         self.assertTrue(cmd[-1].endswith("out.webp"))
 
     def test_gif_fallback_uses_a_palette(self):
@@ -28,15 +30,23 @@ class CommandTests(unittest.TestCase):
         self.assertIn("palettegen", joined)
         self.assertTrue(cmd[-1].endswith("out.gif"))
 
-    def test_playwright_ffmpeg_is_found_under_localappdata(self):
+    def test_winget_ffmpeg_is_found_under_localappdata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp) / "ms-playwright" / "ffmpeg-1011"
-            folder.mkdir(parents=True)
-            binary = folder / "ffmpeg-win64.exe"
+            binary = Path(tmp) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+            binary.parent.mkdir(parents=True)
             binary.write_bytes(b"x")
             with unittest.mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
                 with unittest.mock.patch.object(core.shutil, "which", return_value=None):
                     self.assertEqual(core.find_ffmpeg(), str(binary))
+
+    def test_playwright_ffmpeg_is_not_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "ms-playwright" / "ffmpeg-1011"
+            folder.mkdir(parents=True)
+            (folder / "ffmpeg-win64.exe").write_bytes(b"x")
+            with unittest.mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+                with unittest.mock.patch.object(core.shutil, "which", return_value=None):
+                    self.assertIsNone(core.find_ffmpeg())
 
     def test_convert_without_ffmpeg_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,6 +76,9 @@ class LiveEncodeTests(unittest.TestCase):
                 self.skipTest("ffmpeg could not mint a test mp4")
             written = core.convert_video(src, dest, ffmpeg)
             self.assertGreater(written.stat().st_size, 0)
-            kind = core.sniff(written.read_bytes())
+            data = written.read_bytes()
+            kind = core.sniff(data)
             self.assertIn(kind, ("webp", "gif"))
             self.assertIn(written.suffix, (".webp", ".gif"))
+            if kind == "webp":
+                self.assertTrue(core.is_animated_webp(data))

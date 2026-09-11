@@ -79,6 +79,20 @@ class SniffTests(unittest.TestCase):
         data = b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * 16
         self.assertEqual(core.sniff(data), "webp")
 
+    def test_still_webp_is_not_motion(self):
+        still = b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * 16
+        self.assertFalse(core.is_animated_webp(still))
+        self.assertFalse(core.is_motion(still, "webp"))
+
+    def test_vp8x_animation_flag_is_motion(self):
+        flags = bytes([0x02])
+        anim = (
+            b"RIFF" + (40).to_bytes(4, "little") + b"WEBP"
+            + b"VP8X" + (10).to_bytes(4, "little") + flags + b"\x00" * 16
+        )
+        self.assertTrue(core.is_animated_webp(anim))
+        self.assertTrue(core.is_motion(anim, "webp"))
+
     def test_mp4(self):
         data = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 16
         self.assertEqual(core.sniff(data), "mp4")
