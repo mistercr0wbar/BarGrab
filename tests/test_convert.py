@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,16 @@ class CommandTests(unittest.TestCase):
         joined = " ".join(cmd)
         self.assertIn("palettegen", joined)
         self.assertTrue(cmd[-1].endswith("out.gif"))
+
+    def test_playwright_ffmpeg_is_found_under_localappdata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "ms-playwright" / "ffmpeg-1011"
+            folder.mkdir(parents=True)
+            binary = folder / "ffmpeg-win64.exe"
+            binary.write_bytes(b"x")
+            with unittest.mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+                with unittest.mock.patch.object(core.shutil, "which", return_value=None):
+                    self.assertEqual(core.find_ffmpeg(), str(binary))
 
     def test_convert_without_ffmpeg_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

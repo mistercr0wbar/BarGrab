@@ -214,8 +214,34 @@ def browser_available() -> bool:
     return True
 
 
+def _playwright_ffmpeg() -> str | None:
+    """Playwright ships an ffmpeg next to Chromium. Use it if PATH has none.
+
+    On Windows that is %LOCALAPPDATA%\\ms-playwright\\ffmpeg-*\\ffmpeg-win64.exe,
+    which `python -m playwright install chromium` already downloaded.
+    """
+    roots = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        roots.append(Path(local) / "ms-playwright")
+    roots.append(Path.home() / ".cache" / "ms-playwright")
+    names = ("ffmpeg-win64.exe", "ffmpeg.exe", "ffmpeg-linux", "ffmpeg")
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for folder in sorted(root.glob("ffmpeg-*"), reverse=True):
+            for name in names:
+                candidate = folder / name
+                if candidate.is_file():
+                    return str(candidate)
+    return None
+
+
 def find_ffmpeg() -> str | None:
     found = shutil.which("ffmpeg")
+    if found:
+        return found
+    found = _playwright_ffmpeg()
     if found:
         return found
     try:
