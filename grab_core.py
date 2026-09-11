@@ -1021,11 +1021,17 @@ def first_frame_png(path: Path, size: tuple[int, int] = (320, 200)) -> bytes | N
     try:
         import io
         with Image.open(path) as im:
+            im.seek(0)
             im.load()
             frame = im.convert("RGBA")
-            frame.thumbnail(size)
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            frame.thumbnail(size, resample)
+            canvas = Image.new("RGBA", size, (33, 27, 39, 255))
+            x = (size[0] - frame.width) // 2
+            y = (size[1] - frame.height) // 2
+            canvas.paste(frame, (x, y), frame)
             buf = io.BytesIO()
-            frame.save(buf, format="PNG")
+            canvas.save(buf, format="PNG")
             return buf.getvalue()
     except Exception:
         return None

@@ -203,11 +203,20 @@ class BarGrab(tk.Tk):
         right.pack(side="right", fill="y", padx=(10, 0))
         right.pack_propagate(False)
 
-        self.preview = tk.Label(
-            right, text="nothing selected", bg=PANEL, fg=MUTED,
-            font=("Segoe UI", 10), width=38, height=12,
+        # Never set character width/height on this label. Tk uses characters
+        # when there is no image and pixels once there is one, so width=38
+        # height=12 becomes a 38×12 px strip of the first frame.
+        self.preview_frame = tk.Frame(
+            right, bg=PANEL, width=320, height=200,
+            highlightbackground=EDGE, highlightthickness=1,
         )
-        self.preview.pack(fill="x", pady=(0, 8))
+        self.preview_frame.pack(pady=(0, 8))
+        self.preview_frame.pack_propagate(False)
+        self.preview = tk.Label(
+            self.preview_frame, text="nothing selected", bg=PANEL, fg=MUTED,
+            font=("Segoe UI", 10),
+        )
+        self.preview.pack(fill="both", expand=True)
         self.meta = tk.Label(
             right, text="", bg=INK, fg=TEXT, font=("Consolas", 9),
             justify="left", anchor="nw", wraplength=320,
@@ -365,7 +374,7 @@ class BarGrab(tk.Tk):
                 self._preview_image = tk.PhotoImage(
                     data=base64.b64encode(png).decode("ascii")
                 )
-                self.preview.config(image=self._preview_image, text="")
+                self.preview.config(image=self._preview_image, text="", width=0, height=0)
             except tk.TclError:
                 self._preview_image = None
                 self.preview.config(image="", text="preview failed")
