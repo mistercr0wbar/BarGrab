@@ -55,6 +55,13 @@ MIN_BYTES = 8 * 1024
 MAX_BYTES = 40 * 1024 * 1024
 DEFAULT_CAP = 40
 DEFAULT_DELAY = 1.5
+# A listing is "this many clip links on one page." Below that we treat it as
+# a clip and save media. At or above, we only walk the links — otherwise an
+# infinite-scroll feed dumps every thumbnail into the inbox.
+LISTING_MIN_CLIPS = 4
+# Hard ceiling on files taken from one page, even a clip. Stops a single
+# autoplaying feed from downloading until disk fills.
+PER_PAGE_FILES = 8
 
 EXT_KIND = {
     ".gif": "gif",
@@ -457,6 +464,23 @@ def extract_html(html: str, base_url: str) -> PageExtract:
     return PageExtract(media=collector.media, clip_links=clips)
 
 
+def is_listing(extract: PageExtract, harvest_links: bool) -> bool:
+    return bool(harvest_links and len(extract.clip_links) >= LISTING_MIN_CLIPS)
+
+
+def _prefer_clips(
+    files: list[tuple[bytes, str | None, str]],
+) -> list[tuple[bytes, str | None, str]]:
+    rank = {"mp4": 0, "webm": 0, "gif": 1, "webp": 1, "png": 2, "jpg": 2}
+
+    def key(item: tuple[bytes, str | None, str]) -> int:
+        body, mime, url = item
+        kind = sniff(body) or classify(url, mime) or "jpg"
+        return rank.get(kind, 9)
+
+    return sorted(files, key=key)
+
+
 def is_clip_like(url: str, page_url: str) -> bool:
     parsed = urlparse(url)
     page = urlparse(page_url)
@@ -730,38 +754,39 @@ def capture_html_only(
     opts: CrawlOptions,
     result: CrawlResult,
     cancel: Cancel | None = None,
+    harvest_links: bool = False,
 ) -> PageExtract:
     cancel = cancel or Cancel()
     cancel.raise_if_set()
     html = fetch_text(url, timeout=opts.timeout)
     extracted = extract_html(html, url)
+    if is_listing(extracted, harvest_links):
+        return extracted
+    taken = 0
     for ref in extracted.media:
+        if taken >= PER_PAGE_FILES or result.saved >= opts.cap:
+            break
         cancel.raise_if_set()
         try:
             if ref.url.startswith("data:"):
                 data = decode_data_url(ref.url)
                 if not data:
                     continue
+                before = result.saved
                 _save_captured(library, data, ref.url[:80], url, ref.mime, opts, result)
+                if result.saved > before:
+                    taken += 1
                 continue
             if not is_fetchable(ref.url):
                 continue
             data = fetch_bytes(ref.url, referer=url, timeout=min(opts.timeout, 10))
+            before = result.saved
             _save_captured(library, data, ref.url, url, ref.mime, opts, result)
+            if result.saved > before:
+                taken += 1
         except FetchError as exc:
             result.errors.append(str(exc))
     return extracted
-
-
-def _wait_or_stop(page, cancel: Cancel, ms: int) -> None:
-    steps = max(1, int(ms / 100))
-    for _ in range(steps):
-        cancel.raise_if_set()
-        try:
-            page.wait_for_timeout(100)
-        except Exception:
-            cancel.raise_if_set()
-            raise
 
 
 def capture_browser(
@@ -771,6 +796,7 @@ def capture_browser(
     result: CrawlResult,
     cancel: Cancel | None = None,
     context=None,
+    harvest_links: bool = False,
 ) -> PageExtract:
     cancel = cancel or Cancel()
     cancel.raise_if_set()
@@ -780,7 +806,7 @@ def capture_browser(
     intercepted: list[tuple[bytes, str | None, str]] = []
 
     def on_response(response) -> None:
-        if cancel.is_set():
+        if cancel.is_set() or len(intercepted) >= PER_PAGE_FILES:
             return
         try:
             if response.status != 200:
@@ -808,15 +834,24 @@ def capture_browser(
         except Exception:
             cancel.raise_if_set()
             raise
-        _wait_or_stop(page, cancel, 2500)
-        try:
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            _wait_or_stop(page, cancel, 800)
-        except Stopped:
-            raise
-        except Exception:
-            pass
+        # Do not scroll. Scroll-to-bottom is what infinite-scroll feeds
+        # treat as "load the rest of the internet."
+        extracted = PageExtract()
+        for _ in range(12):
+            cancel.raise_if_set()
+            html = page.content()
+            extracted = extract_html(html, url)
+            if is_listing(extracted, harvest_links):
+                break
+            if intercepted:
+                break
+            try:
+                page.wait_for_timeout(100)
+            except Exception:
+                cancel.raise_if_set()
+                raise
         html = page.content()
+        extracted = extract_html(html, url)
     except Exception:
         cancel.raise_if_set()
         raise
@@ -827,20 +862,14 @@ def capture_browser(
             pass
 
     cancel.raise_if_set()
-    for body, mime, source in intercepted:
+    if is_listing(extracted, harvest_links):
+        return extracted
+    remaining = max(0, opts.cap - result.saved)
+    for body, mime, source in _prefer_clips(intercepted)[: min(PER_PAGE_FILES, remaining)]:
         cancel.raise_if_set()
+        if result.saved >= opts.cap:
+            break
         _save_captured(library, body, source, url, mime, opts, result)
-    extracted = extract_html(html, url)
-    seen_sources = {source for _body, _mime, source in intercepted}
-    for ref in extracted.media:
-        cancel.raise_if_set()
-        if not is_fetchable(ref.url) or ref.url in seen_sources:
-            continue
-        try:
-            data = fetch_bytes(ref.url, referer=url, timeout=min(opts.timeout, 10))
-            _save_captured(library, data, ref.url, url, ref.mime, opts, result)
-        except FetchError as exc:
-            result.errors.append(str(exc))
     return extracted
 
 
@@ -883,11 +912,13 @@ def crawl(
         try:
             if use_browser:
                 extracted = capture_browser(
-                    page_url, library, opts, result, cancel=cancel, context=context
+                    page_url, library, opts, result, cancel=cancel,
+                    context=context, harvest_links=harvest_links,
                 )
             else:
                 extracted = capture_html_only(
-                    page_url, library, opts, result, cancel=cancel
+                    page_url, library, opts, result, cancel=cancel,
+                    harvest_links=harvest_links,
                 )
         except Stopped:
             raise
@@ -903,13 +934,13 @@ def crawl(
     def run_pages() -> None:
         seeds = [url for url in urls if is_fetchable(url)]
         for seed in seeds:
-            if result.pages >= opts.cap:
+            if result.pages >= opts.cap or result.saved >= opts.cap:
                 return
             if stopped():
                 raise Stopped()
             visit(seed, harvest_links=opts.gallery)
         for link in discovered:
-            if result.pages >= opts.cap:
+            if result.pages >= opts.cap or result.saved >= opts.cap:
                 return
             if stopped():
                 raise Stopped()
