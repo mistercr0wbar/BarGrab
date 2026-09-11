@@ -79,17 +79,16 @@ class SniffTests(unittest.TestCase):
         data = b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * 16
         self.assertEqual(core.sniff(data), "webp")
 
-    def test_still_webp_is_kept_as_motion(self):
+    def test_still_webp_is_not_motion(self):
         still = b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * 16
         self.assertFalse(core.is_animated_webp(still))
-        self.assertTrue(core.is_motion(still, "webp"))
+        self.assertFalse(core.is_motion(still, "webp"))
         self.assertFalse(core.is_motion(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "png"))
 
-    def test_vp8x_animation_flag_is_motion(self):
-        flags = bytes([0x02])
+    def test_anmf_chunk_is_motion(self):
         anim = (
             b"RIFF" + (40).to_bytes(4, "little") + b"WEBP"
-            + b"VP8X" + (10).to_bytes(4, "little") + flags + b"\x00" * 16
+            + b"VP8X" + b"\x00\x00\x00\x0a" + b"ANMF" + b"\x00" * 16
         )
         self.assertTrue(core.is_animated_webp(anim))
         self.assertTrue(core.is_motion(anim, "webp"))
@@ -115,9 +114,9 @@ def _gif(n: int) -> bytes:
 
 
 def _webp(n: int, animated: bool = False) -> bytes:
-    flags = bytes([0x02 if animated else 0x00])
-    chunk = b"VP8X" if animated else b"VP8 "
-    return b"RIFF" + (n + 20).to_bytes(4, "little") + b"WEBP" + chunk + flags + b"\x00" * n
+    if animated:
+        return b"RIFF" + (n + 20).to_bytes(4, "little") + b"WEBPANMF" + b"\x00" * n
+    return b"RIFF" + (n + 20).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * n
 
 
 class FullsizeTests(unittest.TestCase):
@@ -130,6 +129,12 @@ class FullsizeTests(unittest.TestCase):
         ])
         self.assertIsNotNone(picked)
         self.assertTrue(picked[2].endswith(".gif"))
+
+    def test_still_webp_is_never_picked(self):
+        still = _webp(80_000, animated=False)
+        self.assertIsNone(core.pick_fullsize([
+            (still, "image/webp", "https://x/poster.webp"),
+        ]))
 
     def test_tiny_gif_loses_to_fullsize_webp(self):
         gif = _gif(100)

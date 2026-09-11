@@ -374,19 +374,17 @@ def is_fetchable(url: str) -> bool:
 
 
 def is_animated_webp(data: bytes) -> bool:
-    """True only for a multi-frame WebP. VP8/VP8L stills are posters."""
-    if len(data) < 21 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
-        return False
-    if data[12:16] == b"VP8X" and data[20] & 0x02:
-        return True
-    return b"ANIM" in data[:4096]
+    """ANMF is the frame chunk. A still WebP never has one; a flag bit lied."""
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP" and b"ANMF" in data
 
 
 def is_motion(data: bytes, kind: str | None = None) -> bool:
-    # WebP is kept even when we cannot see an ANIM chunk — the flag check has
-    # been wrong before and an empty inbox is worse than a skippable poster.
     kind = kind or sniff(data)
-    return kind in {"mp4", "webm", "gif", "webp"}
+    if kind in {"mp4", "webm", "gif"}:
+        return True
+    if kind == "webp":
+        return is_animated_webp(data)
+    return False
 
 
 def sanitize_folder(name: str) -> str:
@@ -519,8 +517,6 @@ def _kind_rank(body: bytes, mime: str | None, url: str) -> int:
         return 3
     if kind == "webp" and is_animated_webp(body):
         return 2
-    if kind == "webp":
-        return 1
     return 0
 
 
@@ -567,22 +563,6 @@ def is_clip_like(url: str, page_url: str) -> bool:
     return len(last) >= 6
 
 
-def webp_command(ffmpeg: str, src: Path, dest: Path) -> list[str]:
-    # fps_mode passthrough is what stops ffmpeg collapsing the video to
-    # one WebP frame. Without it, libwebp "succeeds" and you get a still.
-    return [
-        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(src),
-        "-an",
-        "-loop", "0",
-        "-fps_mode", "passthrough",
-        "-vf", "fps=15,scale='min(720,iw)':-2:flags=lanczos",
-        "-c:v", "libwebp",
-        "-quality", "70",
-        str(dest),
-    ]
-
-
 def gif_command(ffmpeg: str, src: Path, dest: Path) -> list[str]:
     return [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -597,28 +577,23 @@ def gif_command(ffmpeg: str, src: Path, dest: Path) -> list[str]:
 
 
 def convert_video(src: Path, dest: Path, ffmpeg: str | None = None) -> Path:
+    """Always GIF. ffmpeg's WebP encoder has repeatedly written one frame."""
     ffmpeg = ffmpeg or find_ffmpeg()
     if not ffmpeg:
         raise ConvertError("ffmpeg is not installed")
+    dest = dest.with_suffix(".gif")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    cmd = webp_command(ffmpeg, src, dest)
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=120, text=True)
+        proc = subprocess.run(
+            gif_command(ffmpeg, src, dest),
+            capture_output=True, timeout=120, text=True,
+        )
     except FileNotFoundError as exc:
         raise ConvertError("ffmpeg is not installed") from exc
     if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
-        if is_animated_webp(dest.read_bytes()):
-            return dest
+        return dest
+    if dest.exists():
         dest.unlink()
-    elif dest.exists():
-        dest.unlink()
-    gif_dest = dest.with_suffix(".gif")
-    proc = subprocess.run(
-        gif_command(ffmpeg, src, gif_dest),
-        capture_output=True, timeout=120, text=True,
-    )
-    if proc.returncode == 0 and gif_dest.exists() and gif_dest.stat().st_size > 0:
-        return gif_dest
     detail = (proc.stderr or proc.stdout or "ffmpeg failed").strip()
     raise ConvertError(detail.splitlines()[-1] if detail else "ffmpeg failed")
 
@@ -774,8 +749,19 @@ class Library:
     def keep(self, item: InboxItem, folder: str = "") -> Path:
         dest_dir = self.keeper_dir(folder)
         if item.kind in VIDEO_KINDS:
-            dest = dest_dir / f"{item.hash[:12]}.webp"
+            dest = dest_dir / f"{item.hash[:12]}.gif"
             written = convert_video(item.path, dest)
+        elif item.kind == "webp":
+            raw = item.path.read_bytes()
+            if not is_animated_webp(raw):
+                raise ConvertError("this WebP is a still poster, not a clip")
+            dest = dest_dir / f"{item.hash[:12]}.gif"
+            try:
+                written = convert_video(item.path, dest)
+            except ConvertError:
+                dest = dest_dir / f"{item.hash[:12]}.webp"
+                shutil.copy2(item.path, dest)
+                written = dest
         else:
             dest = dest_dir / f"{item.hash[:12]}{KIND_EXT.get(item.kind, item.path.suffix)}"
             shutil.copy2(item.path, dest)
@@ -901,7 +887,7 @@ def capture_browser(
         intercepted.append((body, mime or None, response.url))
 
     def wait_for_clip() -> None:
-        for _ in range(30):
+        for _ in range(50):
             cancel.raise_if_set()
             picked = pick_fullsize(intercepted)
             if picked and _kind_rank(*picked) >= 3:

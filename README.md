@@ -16,8 +16,9 @@ Name a folder in the app (e.g. `whip`). Keep puts files in
 `Pictures\BarGrab\keepers\<folder>\`. Multi-select with Ctrl/Shift. Delete
 removes; Skip remembers not to grab that clip again.
 
-GIF and WebP are copied as-is. MP4/WebM become animated WebP (GIF if WebP
-comes out as a still). You add keepers to BARBIE yourself.
+GIF is copied as-is. MP4/WebM (and animated WebP) become a GIF on Keep —
+ffmpeg's WebP encoder writes a still, so we do not use it. Still poster
+WebPs are not saved. You add keepers to BARBIE yourself.
 
 It does **not** pre-size to BARBIE's 320×200 canvas. She keeps originals and
 resizes on ingest. A keeper over 12 MB is flagged because she will refuse it.

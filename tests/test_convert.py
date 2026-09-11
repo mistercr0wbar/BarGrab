@@ -15,15 +15,6 @@ import grab_core as core
 
 
 class CommandTests(unittest.TestCase):
-    def test_webp_command_loops_and_uses_libwebp(self):
-        cmd = core.webp_command("/usr/bin/ffmpeg", Path("in.mp4"), Path("out.webp"))
-        self.assertIn("-loop", cmd)
-        self.assertEqual(cmd[cmd.index("-loop") + 1], "0")
-        self.assertIn("libwebp", cmd)
-        self.assertIn("-fps_mode", cmd)
-        self.assertIn("passthrough", cmd)
-        self.assertTrue(cmd[-1].endswith("out.webp"))
-
     def test_gif_fallback_uses_a_palette(self):
         cmd = core.gif_command("/usr/bin/ffmpeg", Path("in.mp4"), Path("out.gif"))
         joined = " ".join(cmd)
@@ -76,9 +67,5 @@ class LiveEncodeTests(unittest.TestCase):
                 self.skipTest("ffmpeg could not mint a test mp4")
             written = core.convert_video(src, dest, ffmpeg)
             self.assertGreater(written.stat().st_size, 0)
-            data = written.read_bytes()
-            kind = core.sniff(data)
-            self.assertIn(kind, ("webp", "gif"))
-            self.assertIn(written.suffix, (".webp", ".gif"))
-            if kind == "webp":
-                self.assertTrue(core.is_animated_webp(data))
+            self.assertEqual(written.suffix, ".gif")
+            self.assertEqual(core.sniff(written.read_bytes()), "gif")
