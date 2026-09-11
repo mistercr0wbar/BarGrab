@@ -7,16 +7,16 @@ Windows. Run from source. The crawl does not run on the cr0wbox.
 
 ## What it does
 
-Paste a gallery URL or one-or-more GIF page URLs. Chromium loads the page and
-intercepts what the tab actually downloaded (GIF, animated WebP, MP4, WebM,
-blob URLs). That is how it gets past overlay / right-click tricks.
+Paste a GIF page or a gallery URL. Grab. Chromium loads the page and intercepts
+what the tab actually downloaded (GIF, animated WebP, MP4, WebM). That is how
+it gets past overlay / right-click tricks.
 
-Inbox → Keep / Skip. Keep converts MP4/WebM to animated WebP, which BARBIE
-already accepts. GIF and WebP are copied as-is.
+Name a folder in the app (e.g. `whip`). Keep puts files in
+`Pictures\BarGrab\keepers\<folder>\`. Multi-select with Ctrl/Shift. Delete
+removes; Skip remembers not to grab that clip again.
 
-It does **not** talk to Discord or to BARBIE. Keepers land in
-`Pictures\BarGrab\keepers`. You add them through the board or
-`barbie admin gifs add`.
+GIF and WebP are copied as-is. MP4/WebM become animated WebP (GIF if WebP
+comes out as a still). You add keepers to BARBIE yourself.
 
 It does **not** pre-size to BARBIE's 320×200 canvas. She keeps originals and
 resizes on ingest. A keeper over 12 MB is flagged because she will refuse it.
@@ -39,10 +39,8 @@ The repo is public, so HTTPS does not need a GitHub SSH key. ffmpeg only needs i
 
 Later: `git pull` then `python bargrab.py`. Or double-click `BarGrab.bat`.
 
-If Playwright is missing it still runs, HTML-only, which fails on the overlay
-sites this exists for. The browser checkbox is the real path.
-
-ffmpeg is only needed when you Keep a video. Skip is free.
+Chromium is used automatically when Playwright is installed. ffmpeg is only
+needed when you Keep a video.
 
 ## Library
 
@@ -51,7 +49,7 @@ Default: `%USERPROFILE%\Pictures\BarGrab`
 | Folder / file | What |
 |---|---|
 | `inbox/` | just grabbed, not decided |
-| `keepers/` | Keep. These are what you add to BARBIE |
+| `keepers/<folder>/` | Keep. Named in the app. These are what you add to BARBIE |
 | `skip.json` | hashes of Skip, so a re-crawl does not re-offer them |
 
 Media never goes in git. `.gitignore` blocks `inbox/`, `keepers/`, and every
@@ -61,7 +59,8 @@ Settings: `%APPDATA%\BarGrab\settings.json`.
 
 ## Keys
 
-In the inbox list: **K** keep, **X** skip, **Enter** play in the default app.
+In the inbox list: **K** keep, **X** skip, **Del** delete, **Enter** play,
+**Ctrl+A** select all. Preview loops GIF/WebP frames.
 
 ## Where the source is written
 

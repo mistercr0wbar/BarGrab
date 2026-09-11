@@ -36,6 +36,9 @@ class WindowTests(unittest.TestCase):
 
     def test_it_builds_and_has_its_pieces(self):
         self.assertEqual(self.app.title(), "BarGrab")
-        for piece in ("urls", "listbox", "preview", "preview_frame", "grab_btn", "status"):
+        for piece in (
+            "urls", "listbox", "preview", "preview_frame",
+            "grab_btn", "status", "folder",
+        ):
             with self.subtest(piece=piece):
                 self.assertTrue(hasattr(self.app, piece))

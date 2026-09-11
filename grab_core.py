@@ -355,16 +355,21 @@ def is_animated_webp(data: bytes) -> bool:
         return False
     if data[12:16] == b"VP8X" and data[20] & 0x02:
         return True
-    return b"ANIM" in data[:128]
+    return b"ANIM" in data[:4096]
 
 
 def is_motion(data: bytes, kind: str | None = None) -> bool:
+    # WebP is kept even when we cannot see an ANIM chunk — the flag check has
+    # been wrong before and an empty inbox is worse than a skippable poster.
     kind = kind or sniff(data)
-    if kind in {"mp4", "webm", "gif"}:
-        return True
-    if kind == "webp":
-        return is_animated_webp(data)
-    return False
+    return kind in {"mp4", "webm", "gif", "webp"}
+
+
+def sanitize_folder(name: str) -> str:
+    name = (name or "").strip()
+    name = re.sub(r"[^\w\- ]+", "", name, flags=re.UNICODE)
+    name = re.sub(r"\s+", "_", name).strip("._")
+    return (name[:40] or "unsorted")
 
 
 def sniff(data: bytes) -> str | None:
@@ -646,7 +651,7 @@ class Library:
         prefix = digest[:12]
         if any(self.inbox.glob(f"{prefix}.*")):
             return "inbox"
-        if any(self.keepers.glob(f"{prefix}.*")):
+        if any(self.keepers.rglob(f"{prefix}.*")):
             return "keep"
         return None
 
@@ -718,12 +723,18 @@ class Library:
             ))
         return items
 
-    def keep(self, item: InboxItem) -> Path:
+    def keeper_dir(self, folder: str = "") -> Path:
+        path = self.keepers / sanitize_folder(folder)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def keep(self, item: InboxItem, folder: str = "") -> Path:
+        dest_dir = self.keeper_dir(folder)
         if item.kind in VIDEO_KINDS:
-            dest = self.keepers / f"{item.hash[:12]}.webp"
+            dest = dest_dir / f"{item.hash[:12]}.webp"
             written = convert_video(item.path, dest)
         else:
-            dest = self.keepers / f"{item.hash[:12]}{KIND_EXT.get(item.kind, item.path.suffix)}"
+            dest = dest_dir / f"{item.hash[:12]}{KIND_EXT.get(item.kind, item.path.suffix)}"
             shutil.copy2(item.path, dest)
             written = dest
         sidecar = dict(item.sidecar)
@@ -739,6 +750,9 @@ class Library:
     def skip(self, item: InboxItem) -> None:
         self._skip.add(item.hash)
         self._write_skip()
+        self._forget_inbox(item)
+
+    def delete(self, item: InboxItem) -> None:
         self._forget_inbox(item)
 
     def _forget_inbox(self, item: InboxItem) -> None:
@@ -1013,28 +1027,52 @@ def crawl(
     return result
 
 
-def first_frame_png(path: Path, size: tuple[int, int] = (320, 200)) -> bytes | None:
+def _letterbox_png(frame, size: tuple[int, int]) -> bytes:
+    from PIL import Image
+    import io
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    frame = frame.convert("RGBA")
+    frame.thumbnail(size, resample)
+    canvas = Image.new("RGBA", size, (33, 27, 39, 255))
+    x = (size[0] - frame.width) // 2
+    y = (size[1] - frame.height) // 2
+    canvas.paste(frame, (x, y), frame)
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def preview_frames(
+    path: Path,
+    size: tuple[int, int] = (400, 250),
+    max_frames: int = 48,
+) -> list[tuple[bytes, int]]:
+    """PNG bytes + duration ms for an in-app loop. Empty if Pillow cannot read it."""
     try:
-        from PIL import Image
+        from PIL import Image, ImageSequence
     except ImportError:
-        return None
+        return []
     try:
-        import io
+        frames: list[tuple[bytes, int]] = []
         with Image.open(path) as im:
-            im.seek(0)
-            im.load()
-            frame = im.convert("RGBA")
-            resample = getattr(Image, "Resampling", Image).LANCZOS
-            frame.thumbnail(size, resample)
-            canvas = Image.new("RGBA", size, (33, 27, 39, 255))
-            x = (size[0] - frame.width) // 2
-            y = (size[1] - frame.height) // 2
-            canvas.paste(frame, (x, y), frame)
-            buf = io.BytesIO()
-            canvas.save(buf, format="PNG")
-            return buf.getvalue()
+            n = getattr(im, "n_frames", 1) or 1
+            step = max(1, (n + max_frames - 1) // max_frames) if n > max_frames else 1
+            for i, frame in enumerate(ImageSequence.Iterator(im)):
+                if i % step:
+                    continue
+                duration = int(frame.info.get("duration") or 100)
+                duration = max(40, min(duration * step, 2000))
+                frames.append((_letterbox_png(frame.copy(), size), duration))
+                if len(frames) >= max_frames:
+                    break
+        return frames
     except Exception:
-        return None
+        return []
+
+
+def first_frame_png(path: Path, size: tuple[int, int] = (400, 250)) -> bytes | None:
+    frames = preview_frames(path, size=size, max_frames=1)
+    return frames[0][0] if frames else None
 
 
 def open_path(path: Path) -> None:

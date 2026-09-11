@@ -98,9 +98,33 @@ class LibraryTests(unittest.TestCase):
         )
         self.assertEqual(outcome, "tiny")
 
-    def test_still_webp_is_refused(self):
-        still = b"RIFF" + (30).to_bytes(4, "little") + b"WEBPVP8 " + b"\x00" * core.MIN_BYTES
+    def test_png_poster_is_refused(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * core.MIN_BYTES
         outcome = self.lib.save_bytes(
-            still, source_url="https://x/poster.webp", page_url="https://x/"
+            png, source_url="https://x/poster.png", page_url="https://x/"
         )
         self.assertEqual(outcome, "still")
+
+    def test_keep_goes_into_named_folder(self):
+        item = self.lib.save_bytes(
+            PADDED_GIF, source_url="https://x/a.gif", page_url="https://x/"
+        )
+        kept = self.lib.keep(item, "whip")
+        self.assertEqual(kept.parent.name, "whip")
+        self.assertTrue(kept.exists())
+
+    def test_delete_does_not_remember_a_skip(self):
+        item = self.lib.save_bytes(
+            PADDED_GIF, source_url="https://x/a.gif", page_url="https://x/"
+        )
+        digest = item.hash
+        self.lib.delete(item)
+        again = self.lib.save_bytes(
+            PADDED_GIF, source_url="https://x/a.gif", page_url="https://x/"
+        )
+        self.assertIsInstance(again, core.InboxItem)
+        self.assertEqual(again.hash, digest)
+
+    def test_sanitize_folder_strips_junk(self):
+        self.assertEqual(core.sanitize_folder("whip / ..\\x"), "whip_x")
+        self.assertEqual(core.sanitize_folder(""), "unsorted")
