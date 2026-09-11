@@ -27,6 +27,7 @@ from grab_core import (
     VEST_PURPLE,
     VIDEO_KINDS,
     WARNING,
+    Cancel,
     CrawlOptions,
     InboxItem,
     Library,
@@ -55,7 +56,7 @@ class BarGrab(tk.Tk):
         self.library = Library(lib)
         self._items: list[InboxItem] = []
         self._busy = False
-        self._stop = threading.Event()
+        self._cancel = Cancel()
         self._preview_image = None
 
         self._build()
@@ -260,8 +261,8 @@ class BarGrab(tk.Tk):
 
     def start_grab(self) -> None:
         if self._busy:
-            self._stop.set()
             self.status.config(text="stopping…")
+            self._cancel.stop()
             return
         urls = parse_urls(self.urls.get("1.0", "end"))
         if not urls:
@@ -274,7 +275,7 @@ class BarGrab(tk.Tk):
             messagebox.showinfo(APP_NAME, "Cap and delay have to be numbers.")
             return
         self._busy = True
-        self._stop.clear()
+        self._cancel = Cancel()
         self.grab_btn.config(text="Stop")
         opts = CrawlOptions(
             use_browser=self.use_browser.get(),
@@ -293,7 +294,7 @@ class BarGrab(tk.Tk):
                     self.library,
                     opts,
                     progress=progress,
-                    should_stop=self._stop.is_set,
+                    cancel=self._cancel,
                 )
             except Exception as exc:
                 self.after(0, lambda: self._grab_done(error=str(exc)))
@@ -314,14 +315,15 @@ class BarGrab(tk.Tk):
         extra = ""
         if result.errors:
             extra = f"  ·  {len(result.errors)} page errors"
+        prefix = "stopped. " if result.stopped else ""
         self.status.config(
             text=(
-                f"saved {result.saved}, dupes {result.duplicates}, "
+                f"{prefix}saved {result.saved}, dupes {result.duplicates}, "
                 f"already skipped {result.skipped_known}, "
                 f"pages {result.pages}{extra}"
             )
         )
-        if result.errors and result.saved == 0:
+        if result.errors and result.saved == 0 and not result.stopped:
             messagebox.showwarning(
                 APP_NAME,
                 "Nothing saved.\n\n" + "\n".join(result.errors[:8]),
@@ -417,7 +419,7 @@ class BarGrab(tk.Tk):
         open_path(self.library.keepers)
 
     def _on_close(self) -> None:
-        self._stop.set()
+        self._cancel.stop()
         self.destroy()
 
 

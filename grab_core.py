@@ -18,7 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
-import time
+import threading
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -132,6 +132,51 @@ class ConvertError(Exception):
     """ffmpeg could not turn a video into something BARBIE will take."""
 
 
+class Stopped(Exception):
+    """The user hit Stop. Not an error."""
+
+
+class Cancel:
+    """Stop a crawl from the UI thread, including a live Chromium goto."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._browser = None
+        self._lock = threading.Lock()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def wait(self, seconds: float) -> bool:
+        return self._event.wait(max(0.0, seconds))
+
+    def bind_browser(self, browser) -> None:
+        with self._lock:
+            self._browser = browser
+            kill = self._event.is_set()
+        if kill:
+            self._close_browser()
+
+    def stop(self) -> None:
+        self._event.set()
+        self._close_browser()
+
+    def raise_if_set(self) -> None:
+        if self._event.is_set():
+            raise Stopped()
+
+    def _close_browser(self) -> None:
+        with self._lock:
+            browser = self._browser
+            self._browser = None
+        if browser is None:
+            return
+        try:
+            browser.close()
+        except Exception:
+            pass
+
+
 @dataclass(frozen=True)
 class MediaRef:
     url: str
@@ -164,6 +209,7 @@ class CrawlResult:
     pages: int = 0
     errors: list[str] = field(default_factory=list)
     used_browser: bool = False
+    stopped: bool = False
 
 
 @dataclass
@@ -679,11 +725,18 @@ def _save_captured(
 
 
 def capture_html_only(
-    url: str, library: Library, opts: CrawlOptions, result: CrawlResult
+    url: str,
+    library: Library,
+    opts: CrawlOptions,
+    result: CrawlResult,
+    cancel: Cancel | None = None,
 ) -> PageExtract:
+    cancel = cancel or Cancel()
+    cancel.raise_if_set()
     html = fetch_text(url, timeout=opts.timeout)
     extracted = extract_html(html, url)
     for ref in extracted.media:
+        cancel.raise_if_set()
         try:
             if ref.url.startswith("data:"):
                 data = decode_data_url(ref.url)
@@ -693,21 +746,42 @@ def capture_html_only(
                 continue
             if not is_fetchable(ref.url):
                 continue
-            data = fetch_bytes(ref.url, referer=url, timeout=opts.timeout)
+            data = fetch_bytes(ref.url, referer=url, timeout=min(opts.timeout, 10))
             _save_captured(library, data, ref.url, url, ref.mime, opts, result)
         except FetchError as exc:
             result.errors.append(str(exc))
     return extracted
 
 
+def _wait_or_stop(page, cancel: Cancel, ms: int) -> None:
+    steps = max(1, int(ms / 100))
+    for _ in range(steps):
+        cancel.raise_if_set()
+        try:
+            page.wait_for_timeout(100)
+        except Exception:
+            cancel.raise_if_set()
+            raise
+
+
 def capture_browser(
-    url: str, library: Library, opts: CrawlOptions, result: CrawlResult
+    url: str,
+    library: Library,
+    opts: CrawlOptions,
+    result: CrawlResult,
+    cancel: Cancel | None = None,
+    context=None,
 ) -> PageExtract:
-    from playwright.sync_api import sync_playwright
+    cancel = cancel or Cancel()
+    cancel.raise_if_set()
+    if context is None:
+        raise RuntimeError("capture_browser needs a Playwright context")
 
     intercepted: list[tuple[bytes, str | None, str]] = []
 
     def on_response(response) -> None:
+        if cancel.is_set():
+            return
         try:
             if response.status != 200:
                 return
@@ -721,35 +795,49 @@ def capture_browser(
         if body:
             intercepted.append((body, mime or None, response.url))
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+    html = ""
+    page = context.new_page()
+    try:
+        page.on("response", on_response)
         try:
-            context = browser.new_context(
-                user_agent=UA,
-                viewport={"width": 1280, "height": 800},
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=int(opts.timeout * 1000),
             )
-            page = context.new_page()
-            page.on("response", on_response)
-            page.goto(url, wait_until="domcontentloaded", timeout=int(opts.timeout * 1000))
-            page.wait_for_timeout(2500)
-            try:
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(800)
-            except Exception:
-                pass
-            html = page.content()
-        finally:
-            browser.close()
+        except Exception:
+            cancel.raise_if_set()
+            raise
+        _wait_or_stop(page, cancel, 2500)
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            _wait_or_stop(page, cancel, 800)
+        except Stopped:
+            raise
+        except Exception:
+            pass
+        html = page.content()
+    except Exception:
+        cancel.raise_if_set()
+        raise
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
 
+    cancel.raise_if_set()
     for body, mime, source in intercepted:
+        cancel.raise_if_set()
         _save_captured(library, body, source, url, mime, opts, result)
     extracted = extract_html(html, url)
     seen_sources = {source for _body, _mime, source in intercepted}
     for ref in extracted.media:
+        cancel.raise_if_set()
         if not is_fetchable(ref.url) or ref.url in seen_sources:
             continue
         try:
-            data = fetch_bytes(ref.url, referer=url, timeout=opts.timeout)
+            data = fetch_bytes(ref.url, referer=url, timeout=min(opts.timeout, 10))
             _save_captured(library, data, ref.url, url, ref.mime, opts, result)
         except FetchError as exc:
             result.errors.append(str(exc))
@@ -762,9 +850,11 @@ def crawl(
     opts: CrawlOptions | None = None,
     progress=None,
     should_stop=None,
+    cancel: Cancel | None = None,
 ) -> CrawlResult:
     opts = opts or CrawlOptions()
     result = CrawlResult()
+    cancel = cancel or Cancel()
     use_browser = bool(opts.use_browser and browser_available())
     result.used_browser = use_browser
     if opts.use_browser and not use_browser and progress:
@@ -775,21 +865,32 @@ def crawl(
             progress(message)
 
     def stopped() -> bool:
-        return bool(should_stop and should_stop())
+        if should_stop and should_stop():
+            cancel.stop()
+        return cancel.is_set()
 
     visited: set[str] = set()
     discovered: list[str] = []
+    context = None
 
     def visit(page_url: str, harvest_links: bool) -> None:
-        if page_url in visited or stopped():
+        if stopped():
+            raise Stopped()
+        if page_url in visited:
             return
         visited.add(page_url)
         note(f"{page_url}")
         try:
             if use_browser:
-                extracted = capture_browser(page_url, library, opts, result)
+                extracted = capture_browser(
+                    page_url, library, opts, result, cancel=cancel, context=context
+                )
             else:
-                extracted = capture_html_only(page_url, library, opts, result)
+                extracted = capture_html_only(
+                    page_url, library, opts, result, cancel=cancel
+                )
+        except Stopped:
+            raise
         except Exception as exc:
             result.errors.append(f"{page_url} -> {exc}")
             return
@@ -799,23 +900,58 @@ def crawl(
                 if link not in visited and link not in discovered:
                     discovered.append(link)
 
-    seeds = [url for url in urls if is_fetchable(url)]
-    for seed in seeds:
-        if result.pages >= opts.cap or stopped():
-            break
-        visit(seed, harvest_links=opts.gallery)
+    def run_pages() -> None:
+        seeds = [url for url in urls if is_fetchable(url)]
+        for seed in seeds:
+            if result.pages >= opts.cap:
+                return
+            if stopped():
+                raise Stopped()
+            visit(seed, harvest_links=opts.gallery)
+        for link in discovered:
+            if result.pages >= opts.cap:
+                return
+            if stopped():
+                raise Stopped()
+            if opts.delay and cancel.wait(opts.delay):
+                raise Stopped()
+            visit(link, harvest_links=False)
 
-    for link in discovered:
-        if result.pages >= opts.cap or stopped():
-            break
-        if opts.delay:
-            time.sleep(opts.delay)
-        visit(link, harvest_links=False)
+    try:
+        if use_browser:
+            from playwright.sync_api import sync_playwright
 
-    note(
-        f"saved {result.saved}, dupes {result.duplicates}, "
-        f"pages {result.pages}"
-    )
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                cancel.bind_browser(browser)
+                try:
+                    context = browser.new_context(
+                        user_agent=UA,
+                        viewport={"width": 1280, "height": 800},
+                    )
+                    run_pages()
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+        else:
+            run_pages()
+    except Stopped:
+        result.stopped = True
+    except Exception as exc:
+        if cancel.is_set():
+            result.stopped = True
+        else:
+            result.errors.append(str(exc))
+
+    if result.stopped:
+        note(f"stopped. saved {result.saved}, pages {result.pages}")
+    else:
+        note(
+            f"saved {result.saved}, dupes {result.duplicates}, "
+            f"pages {result.pages}"
+        )
     return result
 
 
