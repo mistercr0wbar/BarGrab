@@ -25,7 +25,7 @@ resizes on ingest. A keeper over 12 MB is flagged because she will refuse it.
 
 ```bat
 cd C:\dev
-git clone git@github.com:mistercr0wbar/BarGrab.git
+git clone https://github.com/mistercr0wbar/BarGrab.git
 cd BarGrab
 py -3 -m venv .venv
 .venv\Scripts\activate
@@ -34,6 +34,8 @@ python -m playwright install chromium
 winget install --id Gyan.FFmpeg -e
 python bargrab.py
 ```
+
+The repo is public, so HTTPS does not need a GitHub SSH key. ffmpeg only needs installing once.
 
 Later: `git pull` then `python bargrab.py`. Or double-click `BarGrab.bat`.
 
