@@ -58,10 +58,34 @@ DEFAULT_DELAY = 1.5
 # A listing is "this many clip links on one page." Below that we treat it as
 # a clip and save media. At or above, we only walk the links — otherwise an
 # infinite-scroll feed dumps every thumbnail into the inbox.
-LISTING_MIN_CLIPS = 4
-# Hard ceiling on files taken from one page, even a clip. Stops a single
-# autoplaying feed from downloading until disk fills.
-PER_PAGE_FILES = 8
+LISTING_MIN_CLIPS = 2
+# Thumbnails are small. A real clip is almost always bigger than this.
+FULLSIZE_MIN_BYTES = 32 * 1024
+# How many network bodies we may buffer on one page before picking the one
+# full-size file. High enough that a poster WebP does not crowd out the GIF.
+INTERCEPT_BUFFER = 48
+
+THUMB_HREFS_JS = """() => {
+  const out = [];
+  const seen = new Set();
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (!a.querySelector('img, video, picture, source')) continue;
+    const r = a.getBoundingClientRect();
+    if (r.width < 72 || r.height < 72) continue;
+    let href = a.href;
+    if (!href || href.startsWith('javascript:') || href.startsWith('#')) continue;
+    try {
+      const u = new URL(href, location.href);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+      href = u.href;
+    } catch { continue; }
+    if (href.split('#')[0] === location.href.split('#')[0]) continue;
+    if (seen.has(href)) continue;
+    seen.add(href);
+    out.push(href);
+  }
+  return out;
+}"""
 
 EXT_KIND = {
     ".gif": "gif",
@@ -487,19 +511,38 @@ def is_listing(extract: PageExtract, harvest_links: bool) -> bool:
     return bool(harvest_links and len(extract.clip_links) >= LISTING_MIN_CLIPS)
 
 
-def _prefer_clips(
+def _kind_rank(body: bytes, mime: str | None, url: str) -> int:
+    kind = sniff(body) or classify(url, mime) or ""
+    if kind == "gif":
+        return 4
+    if kind in {"mp4", "webm"}:
+        return 3
+    if kind == "webp" and is_animated_webp(body):
+        return 2
+    if kind == "webp":
+        return 1
+    return 0
+
+
+def pick_fullsize(
     files: list[tuple[bytes, str | None, str]],
-) -> list[tuple[bytes, str | None, str]]:
-    rank = {"mp4": 0, "webm": 0, "gif": 1, "webp": 1, "png": 2, "jpg": 2}
-
-    def key(item: tuple[bytes, str | None, str]) -> int:
-        body, mime, url = item
-        kind = sniff(body) or classify(url, mime) or "jpg"
-        if kind == "webp" and not is_animated_webp(body):
-            return 3
-        return rank.get(kind, 9)
-
-    return sorted(files, key=key)
+) -> tuple[bytes, str | None, str] | None:
+    """The actual clip on a page: GIF beats WebP, bigger beats a thumbnail."""
+    scored: list[tuple[int, int, bytes, str | None, str]] = []
+    for body, mime, url in files:
+        if not body:
+            continue
+        rank = _kind_rank(body, mime, url)
+        if rank <= 0:
+            continue
+        scored.append((rank, len(body), body, mime, url))
+    if not scored:
+        return None
+    full = [row for row in scored if row[1] >= FULLSIZE_MIN_BYTES]
+    pool = full or scored
+    pool.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    _, _, body, mime, url = pool[0]
+    return body, mime, url
 
 
 def is_clip_like(url: str, page_url: str) -> bool:
@@ -799,30 +842,25 @@ def capture_html_only(
     extracted = extract_html(html, url)
     if is_listing(extracted, harvest_links):
         return extracted
-    taken = 0
+    blobs: list[tuple[bytes, str | None, str]] = []
     for ref in extracted.media:
-        if taken >= PER_PAGE_FILES or result.saved >= opts.cap:
-            break
         cancel.raise_if_set()
         try:
             if ref.url.startswith("data:"):
                 data = decode_data_url(ref.url)
-                if not data:
-                    continue
-                before = result.saved
-                _save_captured(library, data, ref.url[:80], url, ref.mime, opts, result)
-                if result.saved > before:
-                    taken += 1
+                if data:
+                    blobs.append((data, ref.mime, ref.url[:80]))
                 continue
             if not is_fetchable(ref.url):
                 continue
             data = fetch_bytes(ref.url, referer=url, timeout=min(opts.timeout, 10))
-            before = result.saved
-            _save_captured(library, data, ref.url, url, ref.mime, opts, result)
-            if result.saved > before:
-                taken += 1
+            blobs.append((data, ref.mime, ref.url))
         except FetchError as exc:
             result.errors.append(str(exc))
+    picked = pick_fullsize(blobs)
+    if picked and result.saved < opts.cap:
+        body, mime, source = picked
+        _save_captured(library, body, source, url, mime, opts, result)
     return extracted
 
 
@@ -843,7 +881,7 @@ def capture_browser(
     intercepted: list[tuple[bytes, str | None, str]] = []
 
     def on_response(response) -> None:
-        if cancel.is_set() or len(intercepted) >= PER_PAGE_FILES:
+        if cancel.is_set() or len(intercepted) >= INTERCEPT_BUFFER:
             return
         try:
             if response.status != 200:
@@ -862,7 +900,76 @@ def capture_browser(
             return
         intercepted.append((body, mime or None, response.url))
 
+    def wait_for_clip() -> None:
+        for _ in range(30):
+            cancel.raise_if_set()
+            picked = pick_fullsize(intercepted)
+            if picked and _kind_rank(*picked) >= 3:
+                return
+            try:
+                page.wait_for_timeout(100)
+            except Exception:
+                cancel.raise_if_set()
+                raise
+
+    def thumb_hrefs() -> list[str]:
+        try:
+            found = page.evaluate(THUMB_HREFS_JS)
+        except Exception:
+            return []
+        return [href for href in found or [] if is_fetchable(href)]
+
+    def click_thumbs() -> None:
+        start = page.url
+        try:
+            n = page.locator("a:has(img), a:has(video)").count()
+        except Exception:
+            n = 0
+        if n == 0:
+            try:
+                n = page.locator("img, video").count()
+            except Exception:
+                n = 0
+            selector = "img, video"
+        else:
+            selector = "a:has(img), a:has(video)"
+        n = min(n, max(0, opts.cap - result.saved), 40)
+        for i in range(n):
+            cancel.raise_if_set()
+            if result.saved >= opts.cap:
+                return
+            mark = len(intercepted)
+            try:
+                page.locator(selector).nth(i).click(timeout=2500)
+            except Exception:
+                continue
+            wait_for_clip()
+            picked = pick_fullsize(intercepted[mark:])
+            if picked:
+                body, mime, source = picked
+                _save_captured(library, body, source, url, mime, opts, result)
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            if page.url.split("#")[0] != start.split("#")[0]:
+                try:
+                    page.go_back(
+                        wait_until="domcontentloaded",
+                        timeout=int(opts.timeout * 1000),
+                    )
+                except Exception:
+                    try:
+                        page.goto(
+                            start,
+                            wait_until="domcontentloaded",
+                            timeout=int(opts.timeout * 1000),
+                        )
+                    except Exception:
+                        return
+
     html = ""
+    extracted = PageExtract()
     page = context.new_page()
     try:
         page.on("response", on_response)
@@ -875,24 +982,24 @@ def capture_browser(
         except Exception:
             cancel.raise_if_set()
             raise
-        # Do not scroll. Scroll-to-bottom is what infinite-scroll feeds
-        # treat as "load the rest of the internet."
-        extracted = PageExtract()
-        for _ in range(12):
-            cancel.raise_if_set()
-            html = page.content()
-            extracted = extract_html(html, url)
-            if is_listing(extracted, harvest_links):
-                break
-            if intercepted:
-                break
-            try:
-                page.wait_for_timeout(100)
-            except Exception:
-                cancel.raise_if_set()
-                raise
+        wait_for_clip()
         html = page.content()
         extracted = extract_html(html, url)
+        thumbs = thumb_hrefs()
+        if thumbs:
+            extracted.clip_links = list(dict.fromkeys(thumbs + extracted.clip_links))
+        listing = harvest_links and len(extracted.clip_links) >= LISTING_MIN_CLIPS
+        if listing and thumbs:
+            return extracted
+        if listing and not thumbs:
+            click_thumbs()
+            extracted.clip_links = []
+            return extracted
+        picked = pick_fullsize(intercepted)
+        if picked and result.saved < opts.cap:
+            body, mime, source = picked
+            _save_captured(library, body, source, url, mime, opts, result)
+        return extracted
     except Exception:
         cancel.raise_if_set()
         raise
@@ -901,17 +1008,6 @@ def capture_browser(
             page.close()
         except Exception:
             pass
-
-    cancel.raise_if_set()
-    if is_listing(extracted, harvest_links):
-        return extracted
-    remaining = max(0, opts.cap - result.saved)
-    for body, mime, source in _prefer_clips(intercepted)[: min(PER_PAGE_FILES, remaining)]:
-        cancel.raise_if_set()
-        if result.saved >= opts.cap:
-            break
-        _save_captured(library, body, source, url, mime, opts, result)
-    return extracted
 
 
 def crawl(

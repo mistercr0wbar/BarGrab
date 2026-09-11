@@ -7,9 +7,10 @@ Windows. Run from source. The crawl does not run on the cr0wbox.
 
 ## What it does
 
-Paste a GIF page or a gallery URL. Grab. Chromium loads the page and intercepts
-what the tab actually downloaded (GIF, animated WebP, MP4, WebM). That is how
-it gets past overlay / right-click tricks.
+Paste a GIF page or a gallery URL. Grab. Chromium opens the page, finds each
+thumbnail, and opens it. One full-size file is kept per clip — GIF if the
+page has one, otherwise the video/WebP that is pretending to be a GIF.
+Thumbnails and posters are ignored.
 
 Name a folder in the app (e.g. `whip`). Keep puts files in
 `Pictures\BarGrab\keepers\<folder>\`. Multi-select with Ctrl/Shift. Delete

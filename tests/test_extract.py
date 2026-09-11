@@ -106,6 +106,51 @@ class SniffTests(unittest.TestCase):
         self.assertEqual(core.sniff(b"\xff\xd8\xff\xe0" + b"\x00" * 12), "jpg")
 
 
+def _gif(n: int) -> bytes:
+    return (
+        b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff"
+        b",\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+        + b"\x00" * n
+    )
+
+
+def _webp(n: int, animated: bool = False) -> bytes:
+    flags = bytes([0x02 if animated else 0x00])
+    chunk = b"VP8X" if animated else b"VP8 "
+    return b"RIFF" + (n + 20).to_bytes(4, "little") + b"WEBP" + chunk + flags + b"\x00" * n
+
+
+class FullsizeTests(unittest.TestCase):
+    def test_gif_beats_a_bigger_webp(self):
+        gif = _gif(40_000)
+        webp = _webp(200_000, animated=True)
+        picked = core.pick_fullsize([
+            (webp, "image/webp", "https://x/a.webp"),
+            (gif, "image/gif", "https://x/a.gif"),
+        ])
+        self.assertIsNotNone(picked)
+        self.assertTrue(picked[2].endswith(".gif"))
+
+    def test_tiny_gif_loses_to_fullsize_webp(self):
+        gif = _gif(100)
+        webp = _webp(80_000, animated=True)
+        picked = core.pick_fullsize([
+            (gif, "image/gif", "https://x/tiny.gif"),
+            (webp, "image/webp", "https://x/full.webp"),
+        ])
+        self.assertIsNotNone(picked)
+        self.assertTrue(picked[2].endswith(".webp"))
+
+    def test_bigger_of_same_kind_wins(self):
+        a = _gif(40_000)
+        b = _gif(90_000)
+        picked = core.pick_fullsize([
+            (a, "image/gif", "https://x/small.gif"),
+            (b, "image/gif", "https://x/big.gif"),
+        ])
+        self.assertEqual(picked[2], "https://x/big.gif")
+
+
 class ExtractTests(unittest.TestCase):
     def test_video_sources_and_relative_urls(self):
         page = core.extract_html(VIDEO_PAGE, "https://site.example/watch/1")
