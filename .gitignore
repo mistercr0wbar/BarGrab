@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Collected media. The live library is %USERPROFILE%\Pictures\BarGrab, but if
+# the library is ever pointed at this checkout these still catch it.
+inbox/
+keepers/
+skip/
+library/
+index.json
+skip.json
+
+# Raw media anywhere in the tree. Tests use byte literals, not fixture files,
+# so there is no exception for tests/.
+*.gif
+*.mp4
+*.m4v
+*.mov
+*.webm
+*.mkv
+*.avi
+*.webp
+*.jpg
+*.jpeg
+
+# Stills from a crawl landing in the checkout. The window icon is the only png
+# that belongs here.
+/*.png
+!assets/*.png
+!assets/*.ico
